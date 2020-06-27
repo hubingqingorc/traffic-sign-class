@@ -13,9 +13,3 @@ latest 3 epoch precision&recall and loss is show below:
 ![](.\precision_recall.png)
 
 ![](.\loss.png)
-"# traffic-sign-class" 
-"# traffic-sign-class" 
-"# traffic-sign-class-62-" 
-"# traffic-sign-class" 
-"# traffic-sign-class" 
-"# traffic-sign-class" 
