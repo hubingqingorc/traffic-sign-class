@@ -198,6 +198,11 @@ class MultiWorks:
         self.start_time = time.time()  # 开始时间，用于打印用时
         self.data_transform = transforms.Compose([transforms.ToTensor()])  # 数据转换，将图片数据转换为tensor
         self.model_path = model_path  # 模型路径，测试、微调、预测任务时需输入
+        self.train_set = DataSet(do_transform=self.data_transform)  # 返回数据集
+        self.class_weight = self.train_set.class_weight  # 返回类权重
+        self.train_load_data = DataLoader(self.train_set, batch_size=args.batch_size, shuffle=True)  # 数据加载器
+        self.test_set = DataSet(is_train=False, do_transform=self.data_transform)  # 返回数据集
+        self.test_load_data = DataLoader(self.test_set, batch_size=args.test_batch_size, shuffle=False)  # 数据加载器
 
         if not os.path.exists(args.save_directory):  # 新建保存文件夹
             os.makedirs(args.save_directory)
@@ -219,8 +224,8 @@ class MultiWorks:
                   f"mean_precision: {mean_precision}  mean_recall: {mean_recall} "
                   f"cost_time: {time.time() - self.start_time}")
             collect_loss = [['epoch_mean_loss', 'epoch_max_loss', 'epoch_min_loss', 'mean_precision', 'mean_recall']]
-            precision_head = ['precision' + str(i+1) for i in range(args.class_num)]
-            recall_head = ['recall' + str(i+1) for i in range(args.class_num)]
+            precision_head = ['precision' + str(i + 1) for i in range(args.class_num)]
+            recall_head = ['recall' + str(i + 1) for i in range(args.class_num)]
             collect_loss[0].extend(precision_head), collect_loss[0].extend(recall_head)
             precision_list = [i.item() for i in precision]  # 得到各类精度列表形式
             recall_list = [i.item() for i in recall]  # 得到各类召回率列表形式
@@ -234,28 +239,29 @@ class MultiWorks:
             self.predict()
 
     def train(self):
-        data_set = DataSet(do_transform=self.data_transform)  # 返回数据集
-        class_weight = data_set.class_weight  # 返回类权重
-        load_data = DataLoader(data_set, batch_size=args.batch_size, shuffle=True)  # 数据加载器
-        print(f"Start Train!  data_set_len: {data_set.__len__()}")  # 打印任务开始及数据集大小
+        print(f"Start Train!  data_set_len: {self.train_set.__len__()}")  # 打印任务开始及数据集大小
         model = Darknet19().to(device)  # 加载darknet19模型
 
-        criterion = nn.CrossEntropyLoss(torch.tensor(class_weight).to(device))  # 评价器，并输入分类权重
+        criterion = nn.CrossEntropyLoss(torch.tensor(self.class_weight).to(device))  # 评价器，并输入分类权重
         current_lr = args.lr  # 步长
         optimizer = torch.optim.SGD(model.parameters(), lr=current_lr, momentum=args.momentum)  # SGD优化器
 
         # 采集loss并在最后输出.csv文件
-        collect_loss = [['epoch', 'lr', 'epoch_mean_loss', 'epoch_max_loss', 'epoch_min_loss',
-                         'precision', 'recall', 'mean_precision', 'mean_recall']]
+        collect_loss = [['epoch', 'lr', 'train_mean_loss', 'train_max_loss', 'train_min_loss',
+                         'train_precision', 'train_recall', 'train_mean_precision', 'train_mean_recall',
+                         'test_mean_loss', 'test_max_loss', 'test_min_loss',
+                         'test_precision', 'test_recall', 'test_mean_precision', 'test_mean_recall'
+                         ]]
         epoch_count = []
         loss_record = []
         pre_rec = []
         cost_time_record = []
+        x_cls = [x for x in range(62)]
         for i in range(args.epochs):
             epoch_loss = []  # 每轮loss
             cls_tp, cls_tn, cls_fp, cls_fn = torch.zeros(62) + 0.000001, torch.zeros(62), torch.zeros(62), torch.zeros(
                 62)
-            for index, (img, label) in enumerate(load_data):
+            for index, (img, label) in enumerate(self.train_load_data):
                 img = img.to(device)
                 label = label.to(device)
                 optimizer.zero_grad()
@@ -271,23 +277,34 @@ class MultiWorks:
                     cls_tn[c] += torch.sum(class_result[label != c] != c)
                     cls_fp[c] += torch.sum(class_result[label != c] == c)
                     cls_fn[c] += torch.sum(class_result[label == c] != c)
-            epoch_mean_loss = sum(epoch_loss) / (len(epoch_loss))
-            epoch_max_loss = max(epoch_loss)
-            epoch_min_loss = min(epoch_loss)
-            precision, recall = cls_tp / (cls_tp + cls_fp), cls_tp / (cls_tp + cls_fn)  # 得到各类的精度、召回率
-            mean_precision, mean_recall = torch.mean(precision), torch.mean(recall)  # 得到所有类的平均精度和召回率
-            _, _, test_mean_precision, test_mean_recall, mean_loss, max_loss, min_loss = self.test(model.state_dict())
+            train_mean_loss = sum(epoch_loss) / (len(epoch_loss))
+            train_max_loss = max(epoch_loss)
+            train_min_loss = min(epoch_loss)
+            train_precision, train_recall = cls_tp / (cls_tp + cls_fp), cls_tp / (cls_tp + cls_fn)  # 得到各类的精度、召回率
+            train_mean_precision, train_mean_recall = torch.mean(train_precision), torch.mean(
+                train_recall)  # 得到所有类的平均精度和召回率
+            test_precision, test_recall, test_mean_precision, test_mean_recall, \
+            test_mean_loss, test_max_loss, test_min_loss = self.test(model.state_dict())
             # 供visdom显示
             epoch_count.append(i + 1)
-            loss_record.append([epoch_mean_loss, epoch_max_loss, epoch_min_loss, mean_loss, max_loss, min_loss])
-            pre_rec.append([mean_precision, mean_recall, test_mean_precision, test_mean_recall])
+            loss_record.append([train_mean_loss, train_max_loss, train_min_loss,
+                                test_mean_loss, test_max_loss, test_min_loss])
+            pre_rec.append([train_mean_precision, train_mean_recall, test_mean_precision, test_mean_recall])
             cost_time_record.append(time.time() - self.start_time)
             vis.line(X=epoch_count, Y=loss_record, win='chart1', opts=opts1)
             vis.line(X=epoch_count, Y=pre_rec, win='chart2', opts=opts2)
-            vis.line(X=epoch_count, Y=cost_time_record, win='chart3', opts=opts3)
+            each_pre_rec = []
+            for cls_idx in range(62):
+                each_pre_rec.append([train_precision[cls_idx].item(), train_recall[cls_idx].item(),
+                                     test_precision[cls_idx].item(), test_recall[cls_idx].item()])
+            vis.line(X=x_cls, Y=each_pre_rec, win='chart3', opts=opts3)
+            vis.line(X=epoch_count, Y=cost_time_record, win='chart4', opts=opts4)
             # 采集loss
-            collect_loss.append([i, current_lr, epoch_mean_loss, epoch_max_loss, epoch_min_loss,
-                                 precision, recall, mean_precision, mean_recall])
+            collect_loss.append([i, current_lr, train_mean_loss, train_max_loss, train_min_loss,
+                                 train_precision, train_recall, train_mean_precision, train_mean_recall,
+                                 test_mean_loss, test_max_loss, test_min_loss,
+                                 test_precision, test_recall, test_mean_precision, test_mean_recall
+                                 ])
         # 模型保存路径
         save_model_path = os.path.join(args.save_directory, time.strftime('%Y%m%d%H%M') + '_train_epoch_' + str(i)
                                        + ".pt")
@@ -299,12 +316,9 @@ class MultiWorks:
         print('Train complete!')
 
     def test(self, input_model, is_path=False):
-        data_set = DataSet(is_train=False, do_transform=self.data_transform)  # 返回数据集
-        class_weight = data_set.class_weight  # 返回类权重
-        load_data = DataLoader(data_set, batch_size=args.test_batch_size, shuffle=False)  # 数据加载器
         with torch.no_grad():  # 关闭梯度计算
             if is_path:
-                print(f"Start Test!  len_dataset: {data_set.__len__()}")
+                print(f"Start Test!  len_dataset: {self.test_set.__len__()}")
             model = Darknet19().to(device)
             if is_path:  # 模型参数加载
                 model.load_state_dict(torch.load(input_model))
@@ -312,12 +326,12 @@ class MultiWorks:
                 model.load_state_dict(input_model)
             model.eval()  # 关闭参数梯度
 
-            criterion = nn.CrossEntropyLoss(torch.tensor(class_weight).to(device))  # 评价器，并输入分类权重
+            criterion = nn.CrossEntropyLoss(torch.tensor(self.class_weight).to(device))  # 评价器，并输入分类权重
 
             epoch_loss = []  # 每轮loss
             cls_tp, cls_tn, cls_fp, cls_fn = torch.zeros(62) + 0.000001, torch.zeros(62), \
                                              torch.zeros(62), torch.zeros(62)
-            for index, (img, label) in enumerate(load_data):
+            for index, (img, label) in enumerate(self.test_load_data):
                 img = img.to(device)
                 label = label.to(device)
                 output = model(img)
@@ -338,29 +352,30 @@ class MultiWorks:
         return precision, recall, mean_precision, mean_recall, epoch_mean_loss, epoch_max_loss, epoch_min_loss
 
     def finetune(self):
-        data_set = DataSet(do_transform=self.data_transform)  # 返回数据集
-        class_weight = data_set.class_weight  # 返回类权重
-        load_data = DataLoader(data_set, batch_size=args.batch_size, shuffle=True)  # 数据加载器
-        print(f"Start Finetune!  len_data_set: {data_set.__len__()}")  # 打印任务开始及数据集大小
+        print(f"Start Finetune!  len_data_set: {self.train_set.__len__()}")  # 打印任务开始及数据集大小
 
         model = Darknet19().to(device)
         model.load_state_dict(torch.load(self.model_path))  # 模型参数加载
 
-        criterion = nn.CrossEntropyLoss(torch.tensor(class_weight).to(device))  # 评价器，并输入分类权重
+        criterion = nn.CrossEntropyLoss(torch.tensor(self.class_weight).to(device))  # 评价器，并输入分类权重
         current_lr = args.lr  # 步长
         optimizer = torch.optim.SGD(model.parameters(), lr=current_lr, momentum=args.momentum)  # SGD优化器
         # 采集loss并在最后输出.csv文件
-        collect_loss = [['epoch', 'lr', 'epoch_mean_loss', 'epoch_max_loss', 'epoch_min_loss',
-                         'precision', 'recall', 'mean_precision', 'mean_recall']]
+        collect_loss = [['epoch', 'lr', 'train_mean_loss', 'train_max_loss', 'train_min_loss',
+                         'train_precision', 'train_recall', 'train_mean_precision', 'train_mean_recall',
+                         'test_mean_loss', 'test_max_loss', 'test_min_loss',
+                         'test_precision', 'test_recall', 'test_mean_precision', 'test_mean_recall'
+                         ]]
         epoch_count = []
         loss_record = []
         pre_rec = []
         cost_time_record = []
+        x_cls = [x for x in range(62)]
         for i in range(args.epochs):
             epoch_loss = []  # 每轮loss
             cls_tp, cls_tn, cls_fp, cls_fn = torch.zeros(62) + 0.000001, torch.zeros(62), torch.zeros(62), torch.zeros(
                 62)
-            for index, (img, label) in enumerate(load_data):
+            for index, (img, label) in enumerate(self.train_load_data):
                 img = img.to(device)
                 label = label.to(device)
                 optimizer.zero_grad()
@@ -377,23 +392,34 @@ class MultiWorks:
                     cls_fp[c] += torch.sum(class_result[label != c] == c)
                     cls_fn[c] += torch.sum(class_result[label == c] != c)
 
-            epoch_mean_loss = sum(epoch_loss) / (len(epoch_loss))
-            epoch_max_loss = max(epoch_loss)
-            epoch_min_loss = min(epoch_loss)
-            precision, recall = cls_tp / (cls_tp + cls_fp), cls_tp / (cls_tp + cls_fn)  # 得到各类的精度、召回率
-            mean_precision, mean_recall = torch.mean(precision), torch.mean(recall)  # 得到所有类的平均精度和召回率
-            _, _, test_mean_precision, test_mean_recall, mean_loss, max_loss, min_loss = self.test(model.state_dict())
+            train_mean_loss = sum(epoch_loss) / (len(epoch_loss))
+            train_max_loss = max(epoch_loss)
+            train_min_loss = min(epoch_loss)
+            train_precision, train_recall = cls_tp / (cls_tp + cls_fp), cls_tp / (cls_tp + cls_fn)  # 得到各类的精度、召回率
+            train_mean_precision, train_mean_recall = torch.mean(train_precision), torch.mean(
+                train_recall)  # 得到所有类的平均精度和召回率
+            test_precision, test_recall, test_mean_precision, test_mean_recall, \
+            test_mean_loss, test_max_loss, test_min_loss = self.test(model.state_dict())
             # 供visdom显示
             epoch_count.append(i + 1)
-            loss_record.append([epoch_mean_loss, epoch_max_loss, epoch_min_loss, mean_loss, max_loss, min_loss])
-            pre_rec.append([mean_precision, mean_recall, test_mean_precision, test_mean_recall])
+            loss_record.append([train_mean_loss, train_max_loss, train_min_loss,
+                                test_mean_loss, test_max_loss, test_min_loss])
+            pre_rec.append([train_mean_precision, train_mean_recall, test_mean_precision, test_mean_recall])
             cost_time_record.append(time.time() - self.start_time)
             vis.line(X=epoch_count, Y=loss_record, win='chart1', opts=opts1)
             vis.line(X=epoch_count, Y=pre_rec, win='chart2', opts=opts2)
-            vis.line(X=epoch_count, Y=cost_time_record, win='chart3', opts=opts3)
+            each_pre_rec = []
+            for cls_idx in range(62):
+                each_pre_rec.append([train_precision[cls_idx].item(), train_recall[cls_idx].item(),
+                                     test_precision[cls_idx].item(), test_recall[cls_idx].item()])
+            vis.line(X=x_cls, Y=each_pre_rec, win='chart3', opts=opts3)
+            vis.line(X=epoch_count, Y=cost_time_record, win='chart4', opts=opts4)
             # 采集loss
-            collect_loss.append([i, current_lr, epoch_mean_loss, epoch_max_loss, epoch_min_loss,
-                                 precision, recall, mean_precision, mean_recall])
+            collect_loss.append([i, current_lr, train_mean_loss, train_max_loss, train_min_loss,
+                                 train_precision, train_recall, train_mean_precision, train_mean_recall,
+                                 test_mean_loss, test_max_loss, test_min_loss,
+                                 test_precision, test_recall, test_mean_precision, test_mean_recall
+                                 ])
 
         # 保存模型以及微调过程记录
         save_model_path = self.model_path[:-3] + '_finetune_' + str(i) + ".pt"
@@ -435,9 +461,9 @@ if __name__ == '__main__':
                         help='input batch size for training (default: 1)')
     parser.add_argument('--test-batch-size', type=int, default=8, metavar='N',
                         help='input batch size for testing (default: 64)')
-    parser.add_argument('--epochs', type=int, default=3, metavar='N',
+    parser.add_argument('--epochs', type=int, default=10, metavar='N',
                         help='number of epochs to train (default: 100)')
-    parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+    parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                         help='learning rate (default: 0.001)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0)')
@@ -447,18 +473,18 @@ if __name__ == '__main__':
                         help='learnt models are saving here')
     parser.add_argument('--class-num', type=int, default=62,
                         help='class num')
-    parser.add_argument('--work', type=str, default='test',  # train, eval, finetune, predict
+    parser.add_argument('--work', type=str, default='finetune',  # train, eval, finetune, predict
                         help='training, eval, predicting or finetuning')
     args = parser.parse_args()
 
     # visdom可视化设置
-    vis = Visdom(env="traffic-sign-class-1")
+    vis = Visdom(env="traffic-sign-class 20200902")
     assert vis.check_connection()
     opts1 = {
         "title": 'loss of mean/max/min in epoch',
         "xlabel": 'epoch',
         "ylabel": 'loss',
-        "width": 600,
+        "width": 1000,
         "height": 400,
         "legend": ['train_mean_loss', 'train_max_loss', 'train_min_loss', 'test_mean_loss', 'test_max_loss',
                    'test_min_loss']
@@ -466,19 +492,28 @@ if __name__ == '__main__':
     opts2 = {
         "title": 'precision recall with epoch',
         "xlabel": 'epoch',
-        "ylabel": 'precision/recall in percentage',
-        "width": 400,
-        "height": 300,
+        "ylabel": 'precision/recall',
+        "width": 1000,
+        "height": 400,
         "legend": ['train_precision', 'train_recall', 'test_precision', 'test_recall']
     }
     opts3 = {
+        "title": 'precision/recall for each class',
+        "xlabel": 'cls_idx',
+        "ylabel": 'precision/recall',
+        "width": 1000,
+        "height": 400,
+        "legend": ['train_precision', 'train_recall', 'test_precision', 'test_recall']
+    }
+    opts4 = {
         "title": 'cost time with epoch',
         "xlabel": 'epoch',
         "ylabel": 'time in second',
-        "width": 400,
-        "height": 300,
+        "width": 1000,
+        "height": 400,
         "legend": ['cost time']
     }
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device_1 = torch.device("cpu")
 
-    MultiWorks(model_path='save_model/202004171744_train_epoch_9_finetune_9_finetune_9_finetune_2.pt')
+    MultiWorks(model_path='save_model/202004171744_train_epoch_9_finetune_9_finetune_9_finetune_9_finetune_9.pt')
